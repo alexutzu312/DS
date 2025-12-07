@@ -1,0 +1,145 @@
+version: '3.8'
+
+networks:
+  shared-network:
+    driver: bridge
+
+services:
+  # 1. Device Database
+  device-db:
+    image: postgres:16
+    container_name: device-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: device-db
+    volumes:
+      - "./Databases/devicedb:/var/lib/postgresql/data"
+    ports:
+      - "5434:5432" 
+    networks:
+      - shared-network
+
+  # 2. User Database
+  user-db:
+    image: postgres:16
+    container_name: user-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: user-db
+    volumes:
+      - "./Databases/userdb:/var/lib/postgresql/data"
+    ports:
+      - "5433:5432" 
+    networks:
+      - shared-network
+
+  # 3. API GATEWAY (TRAEFIK) - Public entry on 8081
+  traefik:
+    image: traefik:v3.2
+    container_name: traefik
+    command:
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+    ports:
+      - "80:80" # Main public entry point for API and Frontend
+      - "8080:8080" # Dashboard Traefik
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      # Defining the JWT Validation Middleware (ForwardAuth)
+      # Traefik sends the token to the auth-service for validation
+      - "traefik.http.middlewares.jwt-auth.forwardauth.address=http://auth-service:8083/api/auth/validate-token"
+      - "traefik.http.middlewares.jwt-auth.forwardauth.authRequestHeaders=Authorization"
+      - "traefik.http.middlewares.jwt-auth.forwardauth.authResponseHeaders=X-User-Role" 
+    networks:
+      - shared-network
+
+  # 4. AUTHENTICATION SERVICE 
+  auth-service:
+    build: 
+      context: ./AuthenticationService/demo
+      dockerfile: Dockerfile
+    environment:
+      - DB_IP=user-db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=root
+      - DB_DBNAME=user-db
+      - DEVICE_MICROSERVICE_URL=http://device-service:8082
+      - jwt.expirationMs=86400000
+      - jwt.secret=SECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEYSECRETKEY
+    labels:
+      - "traefik.enable=true"
+      # Publicly accessible routes (Login, Register, Validation) - NO jwt-auth middleware
+      - "traefik.http.routers.auth-public.rule=Host(`traefik`) && PathPrefix(`/api/auth`)"
+      - "traefik.http.middlewares.auth-strip.stripprefix.prefixes=/api"
+      - "traefik.http.routers.auth-public.middlewares=auth-strip"
+      - "traefik.http.services.auth-public.loadbalancer.server.port=8083"
+    networks:
+      - shared-network
+
+  # 5. USER MICROSERVICE (All paths protected)
+  user-service:
+    build: 
+      context: ./UserMicroservice/demo
+      dockerfile: Dockerfile
+    environment:
+      - DB_IP=user-db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=root
+      - DB_DBNAME=user-db
+      - DEVICE_MICROSERVICE_URL=http://device-service:8082
+    labels:
+      - "traefik.enable=true"
+      # All requests to /api/users require token validation
+      - "traefik.http.routers.user-all.rule=Host(`traefik`) && PathPrefix(`/api/users`)"
+      - "traefik.http.middlewares.users-strip.stripprefix.prefixes=/api"
+      - "traefik.http.routers.user-all.middlewares=users-strip"
+      # - "traefik.http.routers.user-all.middlewares=jwt-auth" 
+      - "traefik.http.services.user-all.loadbalancer.server.port=8081"
+    networks:
+      - shared-network
+
+  # 6. DEVICE MICROSERVICE (All paths protected)
+  device-service:
+    build: 
+      context: ./DeviceMicroservice/demo
+      dockerfile: Dockerfile
+    environment:
+      - DB_IP=device-db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=root
+      - DB_DBNAME=device-db
+    labels:
+      - "traefik.enable=true"
+      # All requests to /api/devices require token validation
+      - "traefik.http.routers.device-all.rule=Host(`traefik`) && PathPrefix(`/api/devices`)"
+      # - "traefik.http.routers.device-all.middlewares=jwt-auth" 
+      - "traefik.http.services.device-all.loadbalancer.server.port=8082"
+    networks:
+      - shared-network
+      
+  # 7. FRONTEND APPLICATION (Client-side URLs now point to Traefik on 8081)
+  frontend:
+    build:
+      context: ./frontend/frontend
+      dockerfile: Dockerfile
+      args:
+        # The frontend sends ALL API traffic to Traefik's port (8081)
+        REACT_APP_DEVICE_API_GATEWAY_URL: http://traefik/api
+        REACT_APP_USER_API_GATEWAY_URL: http://traefik/api
+        REACT_APP_AUTH_API_GATEWAY_URL : http://traefik/api
+    ports:
+      - "3000:80" # Host 3000 maps to internal Nginx port 80 (Direct access)
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=HostRegexp(`{host:.+}`) && PathPrefix(`/`)"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+    networks:
+      - shared-network
